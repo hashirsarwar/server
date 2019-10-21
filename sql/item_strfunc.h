@@ -1657,30 +1657,6 @@ public:
 };
 
 
-class Item_func_uuid: public Item_str_func
-{
-public:
-  Item_func_uuid(THD *thd): Item_str_func(thd) {}
-  bool fix_length_and_dec()
-  {
-    collation.set(system_charset_info,
-                  DERIVATION_COERCIBLE, MY_REPERTOIRE_ASCII);
-    fix_char_length(MY_UUID_STRING_LENGTH);
-    return FALSE;
-  }
-  bool const_item() const { return false; }
-  table_map used_tables() const { return RAND_TABLE_BIT; }
-  const char *func_name() const{ return "uuid"; }
-  String *val_str(String *);
-  bool check_vcol_func_processor(void *arg)
-  {
-    return mark_unsupported_function(func_name(), "()", arg, VCOL_NON_DETERMINISTIC);
-  }
-  Item *get_copy(THD *thd)
-  { return get_item_copy<Item_func_uuid>(thd, this); }
-};
-
-
 class Item_func_dyncol_create: public Item_str_func
 {
 protected:
