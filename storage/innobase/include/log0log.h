@@ -193,9 +193,8 @@ log_buffer_sync_in_background(
 blocks from the buffer pool: it only checks what is lsn of the oldest
 modification in the pool, and writes information about the lsn in
 log files. Use log_make_checkpoint() to flush also the pool.
-@param[in]	sync		whether to wait for the write to complete
 @return true if success, false if a checkpoint write was already running */
-bool log_checkpoint(bool sync);
+bool log_checkpoint();
 
 /** Make a checkpoint */
 void log_make_checkpoint();
@@ -212,10 +211,9 @@ logs_empty_and_mark_files_at_shutdown(void);
 @param[in]	header	0 or LOG_CHECKPOINT_1 or LOG_CHECKPOINT2 */
 void log_header_read(ulint header);
 /** Write checkpoint info to the log header and invoke log_mutex_exit().
-@param[in]	sync	whether to wait for the write to complete
 @param[in]	end_lsn	start LSN of the MLOG_CHECKPOINT mini-transaction */
 void
-log_write_checkpoint_info(bool sync, lsn_t end_lsn);
+log_write_checkpoint_info(lsn_t end_lsn);
 
 /** Set extra data to be written to the redo log during checkpoint.
 @param[in]	buf	data to be appended on checkpoint, or NULL
@@ -679,10 +677,6 @@ struct log_t{
 	ulint		n_pending_checkpoint_writes;
 					/*!< number of currently pending
 					checkpoint writes */
-	rw_lock_t	checkpoint_lock;/*!< this latch is x-locked when a
-					checkpoint write is running; a thread
-					should wait for this without owning
-					the log mutex */
 
 	/** buffer for checkpoint header */
 	MY_ALIGNED(OS_FILE_LOG_BLOCK_SIZE)
@@ -704,9 +698,6 @@ public:
   bool is_encrypted() const { return(log.is_encrypted()); }
 
   bool is_initialised() const { return m_initialised; }
-
-  /** Complete an asynchronous checkpoint write. */
-  void complete_checkpoint();
 
   /** @return the log block header + trailer size */
   unsigned framing_size() const

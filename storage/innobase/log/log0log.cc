@@ -281,7 +281,7 @@ log_margin_checkpoint_age(
 		if (!flushed_enough) {
 			os_thread_sleep(100000);
 		}
-		log_checkpoint(true);
+		log_checkpoint();
 
 		log_mutex_enter();
 	}
@@ -575,7 +575,6 @@ void log_t::create()
   n_pending_checkpoint_writes= 0;
 
   last_checkpoint_lsn= lsn;
-  rw_lock_create(checkpoint_lock_key, &checkpoint_lock, SYNC_NO_ORDER_CHECK);
 
   log_block_init(buf, lsn);
   log_block_set_first_rec_group(buf, LOG_BLOCK_HDR_SIZE);
@@ -1196,24 +1195,6 @@ log_complete_checkpoint(void)
 			      log_sys.last_checkpoint_lsn,
 			      log_sys.flushed_to_disk_lsn));
 
-	rw_lock_x_unlock_gen(&(log_sys.checkpoint_lock), LOG_CHECKPOINT);
-}
-
-/** Complete an asynchronous checkpoint write. */
-void log_t::complete_checkpoint()
-{
-	ut_ad(this == &log_sys);
-	MONITOR_DEC(MONITOR_PENDING_CHECKPOINT_WRITE);
-
-	log_mutex_enter();
-
-	ut_ad(n_pending_checkpoint_writes > 0);
-
-	if (!--n_pending_checkpoint_writes) {
-		log_complete_checkpoint();
-	}
-
-	log_mutex_exit();
 }
 
 /** Write checkpoint info to the log header.
@@ -1263,21 +1244,36 @@ log_group_checkpoint(lsn_t end_lsn)
 	ut_ad(LOG_CHECKPOINT_1 < srv_page_size);
 	ut_ad(LOG_CHECKPOINT_2 < srv_page_size);
 
-	if (log_sys.n_pending_checkpoint_writes++ == 0) {
-		rw_lock_x_lock_gen(&log_sys.checkpoint_lock,
-				   LOG_CHECKPOINT);
-	}
+	++log_sys.n_pending_checkpoint_writes;
 
 	/* Note: We alternate the physical place of the checkpoint info.
 	See the (next_checkpoint_no & 1) below. */
 
-	fil_io(IORequestLogWrite, false,
+	fil_io(IORequestLogWrite, true,
 	       page_id_t(SRV_LOG_SPACE_FIRST_ID, 0),
 	       0,
 	       (log_sys.next_checkpoint_no & 1)
 	       ? LOG_CHECKPOINT_2 : LOG_CHECKPOINT_1,
 	       OS_FILE_LOG_BLOCK_SIZE,
-	       buf, reinterpret_cast<void*>(1) /* checkpoint write */);
+	       buf, NULL);
+
+	switch (srv_flush_t(srv_file_flush_method)) {
+		case SRV_O_DSYNC:
+		case SRV_NOSYNC:
+			break;
+		case SRV_FSYNC:
+		case SRV_LITTLESYNC:
+		case SRV_O_DIRECT:
+		case SRV_O_DIRECT_NO_FSYNC:
+#ifdef _WIN32
+		case SRV_ALL_O_DIRECT_FSYNC:
+#endif
+			fil_flush(SRV_LOG_SPACE_FIRST_ID);
+		}
+
+	if (!--log_sys.n_pending_checkpoint_writes) {
+		log_complete_checkpoint();
+	}
 }
 
 /** Read a log group header page to log_sys.checkpoint_buf.
@@ -1298,10 +1294,9 @@ void log_header_read(ulint header)
 }
 
 /** Write checkpoint info to the log header and invoke log_mutex_exit().
-@param[in]	sync	whether to wait for the write to complete
 @param[in]	end_lsn	start LSN of the MLOG_CHECKPOINT mini-transaction */
 void
-log_write_checkpoint_info(bool sync, lsn_t end_lsn)
+log_write_checkpoint_info(lsn_t end_lsn)
 {
 	ut_ad(log_mutex_own());
 	ut_ad(!srv_read_only_mode);
@@ -1311,16 +1306,6 @@ log_write_checkpoint_info(bool sync, lsn_t end_lsn)
 	log_mutex_exit();
 
 	MONITOR_INC(MONITOR_NUM_CHECKPOINT);
-
-	if (sync) {
-		/* Wait for the checkpoint write to complete */
-		rw_lock_s_lock(&log_sys.checkpoint_lock);
-		rw_lock_s_unlock(&log_sys.checkpoint_lock);
-
-		DBUG_EXECUTE_IF(
-			"crash_after_checkpoint",
-			DBUG_SUICIDE(););
-	}
 }
 
 /** Set extra data to be written to the redo log during checkpoint.
@@ -1341,9 +1326,8 @@ log_append_on_checkpoint(
 blocks from the buffer pool: it only checks what is lsn of the oldest
 modification in the pool, and writes information about the lsn in
 log files. Use log_make_checkpoint() to flush also the pool.
-@param[in]	sync		whether to wait for the write to complete
 @return true if success, false if a checkpoint write was already running */
-bool log_checkpoint(bool sync)
+bool log_checkpoint()
 {
 	lsn_t	oldest_lsn;
 
@@ -1440,17 +1424,11 @@ bool log_checkpoint(bool sync)
 		/* A checkpoint write is running */
 		log_mutex_exit();
 
-		if (sync) {
-			/* Wait for the checkpoint write to complete */
-			rw_lock_s_lock(&log_sys.checkpoint_lock);
-			rw_lock_s_unlock(&log_sys.checkpoint_lock);
-		}
-
 		return(false);
 	}
 
 	log_sys.next_checkpoint_lsn = oldest_lsn;
-	log_write_checkpoint_info(sync, end_lsn);
+	log_write_checkpoint_info(end_lsn);
 	ut_ad(!log_mutex_own());
 
 	return(true);
@@ -1465,7 +1443,7 @@ void log_make_checkpoint()
 		/* Flush as much as we can */
 	}
 
-	while (!log_checkpoint(true)) {
+	while (!log_checkpoint()) {
 		/* Force a checkpoint */
 	}
 }
@@ -1508,21 +1486,17 @@ loop:
 
 	checkpoint_age = log_sys.lsn - log_sys.last_checkpoint_lsn;
 
-	bool	checkpoint_sync;
 	bool	do_checkpoint;
 
 	if (checkpoint_age > log_sys.max_checkpoint_age) {
 		/* A checkpoint is urgent: we do it synchronously */
-		checkpoint_sync = true;
 		do_checkpoint = true;
 	} else if (checkpoint_age > log_sys.max_checkpoint_age_async) {
 		/* A checkpoint is not urgent: do it asynchronously */
 		do_checkpoint = true;
-		checkpoint_sync = false;
 		log_sys.check_flush_or_checkpoint = false;
 	} else {
 		do_checkpoint = false;
-		checkpoint_sync = false;
 		log_sys.check_flush_or_checkpoint = false;
 	}
 
@@ -1545,12 +1519,7 @@ loop:
 	}
 
 	if (do_checkpoint) {
-		log_checkpoint(checkpoint_sync);
-
-		if (checkpoint_sync) {
-
-			goto loop;
-		}
+		log_checkpoint();
 	}
 }
 
@@ -1944,7 +1913,6 @@ void log_t::close()
   buf = NULL;
 
   os_event_destroy(flush_event);
-  rw_lock_free(&checkpoint_lock);
   mutex_free(&mutex);
   mutex_free(&write_mutex);
   mutex_free(&log_flush_order_mutex);

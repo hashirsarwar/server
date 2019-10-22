@@ -4384,27 +4384,7 @@ fil_aio_wait(
 
 	switch (purpose) {
 	case FIL_TYPE_LOG:
-		srv_set_io_thread_op_info(segment, "complete io for log");
-		/* We use synchronous writing of the logs
-		and can only end up here when writing a log checkpoint! */
-		ut_a(ptrdiff_t(message) == 1);
-		/* It was a checkpoint write */
-		switch (srv_flush_t(srv_file_flush_method)) {
-		case SRV_O_DSYNC:
-		case SRV_NOSYNC:
-			break;
-		case SRV_FSYNC:
-		case SRV_LITTLESYNC:
-		case SRV_O_DIRECT:
-		case SRV_O_DIRECT_NO_FSYNC:
-#ifdef _WIN32
-		case SRV_ALL_O_DIRECT_FSYNC:
-#endif
-			fil_flush(SRV_LOG_SPACE_FIRST_ID);
-		}
-
-		DBUG_PRINT("ib_log", ("checkpoint info written"));
-		log_sys.complete_checkpoint();
+		ut_ad(0);
 		return;
 	case FIL_TYPE_TABLESPACE:
 	case FIL_TYPE_TEMPORARY:
